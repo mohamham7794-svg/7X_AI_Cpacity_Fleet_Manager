@@ -35,3 +35,14 @@ API serve it:
     cd .. && uvicorn apps.api.main:app --reload
 Then http://127.0.0.1:8000 serves both. `docker compose up --build` does
 this automatically.
+
+
+## images:
+
+![alt text](frdrt-1.png)
+
+![alt text](awrett-1.png)
+
+
+
+
