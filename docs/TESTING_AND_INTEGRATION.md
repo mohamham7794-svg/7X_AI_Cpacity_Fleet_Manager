@@ -156,11 +156,24 @@ curl "http://127.0.0.1:8000/v1/stores/STORE_001/summary?horizon_hours=24"
 ```bash
 docker compose up --build
 ```
-This starts the API (port 8000) + Postgres (port 5432). The API's
-`DATABASE_URL` is already pointed at the `db` service in
-`docker-compose.yml`. You still need to seed data (step 2, option B) once
-the containers are up — either exec into the API container or add a
-one-off seeding script/service if you want it automatic on boot.
+This starts **one URL** — http://localhost:8000 — plus Postgres (port
+5432) behind the scenes. The `Dockerfile` is a multi-stage build: stage 1
+builds the Wasel frontend (`apps/web`) with `npm run build`, stage 2 is
+the Python API image, which copies in the built frontend and serves it as
+static files from `/` (see the `StaticFiles` mount at the bottom of
+`apps/api/main.py`). `/v1/...` and `/healthz` still work exactly as
+before — the frontend mount is added last so it never shadows them.
+
+There's no separate `web` container/port anymore; `docker-compose.yml`
+only defines `api` + `db`. The API's `DATABASE_URL` is already pointed at
+the `db` service. You still need to seed data (step 2, option B) once the
+containers are up — either exec into the API container or add a one-off
+seeding script/service if you want it automatic on boot.
+
+If you're actively editing frontend code, Docker's baked-in build isn't
+what you want (no hot reload) — run `apps/web` as its own dev server
+instead (§6.3 has the one-line command), against the Dockerized or
+locally-run API.
 
 ---
 
@@ -175,6 +188,7 @@ there.
 | Method | Path | Purpose |
 |---|---|---|
 | `GET`  | `/v1/stores` | List all store IDs with data loaded |
+| `POST` | `/v1/events` | Ingest one raw frontend event (Wasel); `order_placed` rolls up into hourly shipment data. No auth required — public/unauthenticated by design |
 | `POST` | `/v1/forecast` | Get an N-hour shipment forecast for one store |
 | `POST` | `/v1/driver-requirements` | Convert forecasts → drivers needed per hour |
 | `POST` | `/v1/simulate` | Run a staffing plan through the hour-by-hour simulator |
@@ -205,7 +219,43 @@ For an "Explain this recommendation" button next to a hiring plan, call
 (`naive_baseline_cost`, `demand_change_pct`, etc. — all of which you'll
 already have computed from earlier calls).
 
-### 6.3 CORS
+### 6.3 Live event ingestion (Wasel -> forecasting)
+
+`apps/web/src/events.js#trackEvent()` already POSTs every interaction to
+`{VITE_EVENTS_API_BASE_URL}/v1/events` — this now has a real endpoint to
+land on. What happens on each call:
+
+- The raw event is stored (idempotent on `event_id`, so a retried/duplicate
+  POST from a flaky network is a no-op).
+- If `type == "order_placed"`, it's also folded into the hourly
+  `ShipmentRecord` bucket for that `store_id` (creating the bucket if it's
+  the first order that hour, incrementing it otherwise) — the same table
+  `packages/forecasting` already reads for synthetic/bulk-loaded data.
+- The in-memory trained-model cache for that store is evicted, so the next
+  `/v1/forecast` or `/v1/stores/{id}/summary` call retrains on the fresh
+  data instead of serving a stale model.
+
+This endpoint intentionally has **no bearer-token dependency** — Wasel is a
+public, unauthenticated consumer frontend, unlike the planning endpoints
+above which assume a trusted dashboard/ops caller.
+
+Other event types (`page_view`, `store_viewed`, `item_added`, etc.) are
+stored as-is for later use (funnel analysis) but don't affect forecasting
+yet.
+
+With the Docker build (§5), the frontend and API share an origin, so
+`events.js`'s default `VITE_EVENTS_API_BASE_URL` (`http://localhost:8000`)
+already points at the right place with no config needed — CORS doesn't
+even come into play since it's all one origin. Only if you run the
+Vite dev server separately (§6.6 below) on its own port do you need CORS
+and an explicit `VITE_EVENTS_API_BASE_URL`.
+
+To see it work end-to-end: `docker compose up --build`, open
+http://localhost:8000, place an order in Wasel, then check
+`GET /v1/stores/{id}/summary` — the new hour's data will already
+be reflected in the next forecast.
+
+### 6.4 CORS
 
 CORS middleware is already wired in `apps/api/main.py`, open (`*`) by
 default so local frontend dev works out of the box. Before deploying
@@ -214,7 +264,7 @@ publicly, restrict it via an env var:
 export CORS_ALLOW_ORIGINS="https://your-dashboard.example.com,http://localhost:3000"
 ```
 
-### 6.4 Generating a typed client (optional, saves a lot of manual typing)
+### 6.5 Generating a typed client (optional, saves a lot of manual typing)
 
 Since every request/response is a Pydantic model, the OpenAPI schema at
 `/openapi.json` is fully typed. You can generate a TypeScript client
@@ -226,7 +276,7 @@ npx openapi-typescript http://127.0.0.1:8000/openapi.json -o frontend/src/api-ty
 or a full client with `openapi-generator-cli` / `orval` if you want
 generated hooks (e.g. React Query) instead of just types.
 
-### 6.5 Auth from the frontend
+### 6.6 Auth from the frontend
 
 If you turn on `API_BEARER_TOKEN`, every frontend request needs:
 ```js
@@ -239,7 +289,7 @@ For a real deployment, swap the shared bearer token for per-user auth
 explicitly the "don't over-engineer it yet" version called for in the
 build prompt, not a production auth system.
 
-### 6.6 Suggested frontend shape (not built — you're free to choose any stack)
+### 6.7 Suggested frontend shape (not built — you're free to choose any stack)
 
 - **Store picker** → `GET /v1/stores`
 - **Forecast chart** (line chart, predicted shipments over the horizon) → `GET /v1/stores/{id}/summary`
@@ -252,25 +302,3 @@ build prompt, not a production auth system.
 None of this requires touching `packages/` or `apps/api/main.py` beyond the
 CORS addition above — that's the entire point of keeping the backend a
 clean, versioned REST API per the original build prompt's scope.
-
-## alternative:
-
-```
-1. Install
-pip install fastapi uvicorn pydantic pandas sqlalchemy ortools simpy lightgbm shap pytest httpx
-
-2. Load sample data + run tests
-pytest
-
-3. Seed the database the API reads from
-python -c "
-from apps.api.db import init_db, upsert_records
-from packages.analytics.schemas import ShipmentRecord
-from scripts.generate_synthetic_data import generate
-init_db()
-upsert_records([ShipmentRecord(**r) for r in generate(n_stores=5, n_days=120, seed=42)])
-"
-
-4. Start the API
-uvicorn apps.api.main:app --reload
-```

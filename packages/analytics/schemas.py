@@ -29,6 +29,32 @@ class ShipmentRecord(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Live event ingestion (Wasel frontend -> POST /v1/events)
+# ---------------------------------------------------------------------------
+
+class RawEvent(BaseModel):
+    """Matches apps/web/src/events.js#trackEvent() payload exactly. Every
+    interaction in the Wasel frontend flows through this shape; only
+    'order_placed' currently rolls up into ShipmentRecord rows, other
+    event types are stored as-is for later use (funnel analysis, etc.)."""
+
+    event_id: str
+    type: str
+    timestamp: datetime
+    session_id: str | None = None
+    store_id: str | None = None
+    order_id: str | None = None
+    view: str | None = None
+    item_id: str | None = None
+    item_name: str | None = None
+    price: float | None = None
+    item_count: int | None = None
+    items: list[dict] | None = None
+    total: float | None = None
+    status: str | None = None
+
+
+# ---------------------------------------------------------------------------
 # Forecasting (Phase 2)
 # ---------------------------------------------------------------------------
 

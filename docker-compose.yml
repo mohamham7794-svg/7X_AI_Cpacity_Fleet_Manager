@@ -1,6 +1,9 @@
 version: "3.9"
 
 services:
+  # Single service now serves both the API and the built Wasel frontend
+  # (see Dockerfile's multi-stage build and apps/api/main.py's StaticFiles
+  # mount) — one URL, one port, no separate web container to juggle.
   api:
     build: .
     ports:
