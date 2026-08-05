@@ -41,8 +41,4 @@ this automatically.
 
 ![alt text](frdrt-1.png)
 
-![alt text](awrett-1.png)
-
-
-
-
+![alt text](<ChatGPT Image Aug 5, 2026, 07_01_06 AM.png>)
